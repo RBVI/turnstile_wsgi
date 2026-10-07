@@ -32,15 +32,15 @@ Future Improvements
 -------------------
 
 It would be nice to allow a single Turnstile challenge to authorize
-multiple URL requests.  That would need for the server to issue a
-(cryptographic signed) session cookie after a successful challenge that
-is valid for some period of time.  And then check that cookie on the
-next request.  If it has expired, then reissue a Turnstile challenge,
-otherwise pass through.
+multiple URL requests.  To do that, the server would need to issue a
+time-limited (cryptographically signed) session cookie after a successful
+challenge.  And then check that cookie on the subsequent requests.  If it
+has expired, then reissue a Turnstile challenge, otherwise pass through.
 
 
 References
 ----------
 
 * [Cloudflare Turnstile](https://www.cloudflare.com/products/turnstile/)
-* [Developer Documentation](https://developers.cloudflare.com/turnstile/)
+* [Turnstile Developer Documentation](https://developers.cloudflare.com/turnstile/)
+* [PEP 3333](https://peps.python.org/pep-3333/) – Python Web Server Gateway Interface

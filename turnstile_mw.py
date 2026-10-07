@@ -98,6 +98,7 @@ CHALLENGE = b"""\
 def is_safe_network(environ: WSGIEnvironment) -> bool:
     """Return if request is from a safe network.
 
+    Checks if IP address is in :py:data:`SAFE_NETWORKS`.
     By default, private networks, and localhost are safe.
     """
     client_ip = ipaddress.ip_address(environ.get("REMOTE_ADDR"))
@@ -133,17 +134,21 @@ def is_direct_fetch(environ: WSGIEnvironment) -> bool:
 
 
 def default_pass_thru(environ: WSGIEnvironment) -> bool:
-    """Skip Turnstile check on safe networks and authenticated connections."""
+    """Default pass through function
+
+    Skip Turnstile challenge on (a) authenticated connections,
+    (b) direct fetching of audio, video, images, and JSON,
+    (c) on safe networks.
+    """
     return is_user_authenticated(environ) or is_direct_fetch(environ) or is_safe_network(environ)
 
 
 class TurnstileMiddleware(WSGIApplication):
     """Turnstile WSGI Middleware.
 
-    Arguments are the Turnstile site key, secret key, and optionallly,
-    a pass through function that skips the Turnstile middleware.  By
-    default, the pass through is done if the web server has authenticated
-    the connection.
+    Arguments are the Turnstile site key, secret key, and an optional
+    a pass through function that is used to decide when the Turnstile
+    challenge should be skipped.
     """
 
     TIMEOUT = 10      # how many seconds to wait for Cloudflare to respond
