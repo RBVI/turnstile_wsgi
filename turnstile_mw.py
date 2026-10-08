@@ -67,16 +67,16 @@ CHALLENGE = b"""\
   <noscript>Enable JavaScript to see content</noscript>
   <div id="w"></div>
   <script>
-    c = console;
-    window.onload = function() {
-      turnstile.render("#w", {
+    onload = function() {
+      c = console;
+      turnstile.render(w, {
         sitekey: "SITE_KEY",
         callback: function(t) {
           document.cookie = `%s=${encodeURIComponent(t)}; max-age=1; path=/; samesite=strict`;
-          window.location.reload()
+          location.reload()
         },
-        "error-callback": function(ec) {
-          c.log("Error:", ec)
+        "error-callback": function(e) {
+          c.log("Error:", e)
         },
         "expired-callback": function() {
           c.log("Token expired")
