@@ -11,9 +11,7 @@ By default, Turnstile challenges are skipped for requests with authenticated
 users, from private networks, and for image, audio, video, and json requests.
 """
 from __future__ import annotations
-import io
 import ipaddress
-import gzip
 from http.cookies import SimpleCookie
 import mimetypes
 import re
@@ -21,13 +19,41 @@ import sys
 import typing
 import urllib.parse
 import uuid
+import requests
 if sys.version_info >= (3, 11):
     from wsgiref.types import WSGIApplication, WSGIEnvironment, StartResponse
 else:
-    class WSGIEnvironment: pass
-    class StartResponse: pass
-    class WSGIApplication: pass
-import requests
+    class WSGIEnvironment:
+        """Placeholder."""
+    class StartResponse:
+        """Placeholder."""
+    class WSGIApplication:
+        """Placeholder."""
+# compression packages
+try:
+    import brotli
+    HAS_BROTLI = True
+except ImportError:
+    HAS_BROTLI = False
+try:
+    import gzip
+    HAS_GZIP = True
+except ImportError:
+    HAS_GZIP = False
+try:
+    import zlib
+    HAS_ZLIB = True
+except ImportError:
+    HAS_ZLIB = False
+try:
+    from compression import zstd
+    HAS_ZSTD = True
+except ImportError:
+    try:
+        import zstandard as zstd
+        HAS_ZSTD = True
+    except ImportError:
+        HAS_ZSTD = False
 
 SITE_KEY_LENGTH = 24
 """Length of Turnstile site key."""
@@ -134,7 +160,7 @@ def is_direct_fetch(environ: WSGIEnvironment) -> bool:
 
 
 def default_pass_thru(environ: WSGIEnvironment) -> bool:
-    """Default pass through function
+    """Provide default pass through function.
 
     Skip Turnstile challenge on (a) authenticated connections,
     (b) direct fetching of audio, video, images, and JSON,
@@ -170,10 +196,30 @@ class TurnstileMiddleware(WSGIApplication):
         trailing_space = re.compile(rb"([>){},:;=]) ")
         chall = CHALLENGE.replace(b"SITE_KEY", site_key).replace(b" =", b"=")
         self.challenge = trailing_space.sub(lambda t: t.group(1), b" ".join(chall.split()))
-        buffer = io.BytesIO()
-        with gzip.GzipFile(fileobj=buffer, mode="wb", compresslevel=9) as file:
-            file.write(self.challenge)
-        self.compressed_challenge = buffer.getvalue()
+        # compressed challenges — compress once, reuse many times
+        self.compressed_challenge = {}
+        self.compression_order = []
+        if HAS_GZIP:
+            self.compression_order.append("gzip")
+            self.compressed_challenge["gzip"] = gzip.compress(self.challenge, compresslevel=9)
+        if HAS_ZLIB:
+            self.compression_order.append("deflate")
+            if sys.version_info >= (3, 11):
+                self.compressed_challenge["deflate"] = zlib.compress(
+                    self.challenge, level=zlib.Z_BEST_COMPRESSION, wbits=-zlib.MAX_WBITS)
+            else:
+                compressor = zlib.compressobj(zlib.Z_BEST_COMPRESSION, wbits=-zlib.MAX_WBITS)
+                data = compressor.compress(self.challenge)
+                data += compressor.flush()
+                self.compressed_challenge["deflate"] = data
+        if HAS_BROTLI:
+            self.compression_order.append("br")
+            self.compressed_challenge["br"] = brotli.compress(self.challenge)
+        if HAS_ZSTD:
+            self.compression_order.append("zstd")
+            self.compressed_challenge["zstd"] = zstd.compress(self.challenge)
+        # sort so smallest compressed challenge is last, aka, best
+        self.compression_order.sort(key=lambda x: -len(self.compressed_challenge[x]))
 
     def __call__(self, environ: WSGIEnvironment, start_response: StartResponse) -> bytes:
         """Implement Turnstile protocol."""
@@ -183,17 +229,17 @@ class TurnstileMiddleware(WSGIApplication):
         if method != "GET":
             # not my problem...
             return self.app(environ, start_response)
-        compressed = False
+        compressed = ""
         cookies = SimpleCookie()
         cookies.load(environ.get("HTTP_COOKIE", ""))
         if COOKIE_NAME not in cookies:
             status = "200 OK"
             content_type = "text/html; charset=utf-8"
-            if "gzip" not in environ.get("HTTP_ACCEPT_ENCODING", ""):
-                response_body = [self.challenge]
+            compressed = self.get_content_encoding(environ)
+            if compressed:
+                response_body = [self.compressed_challenge[compressed]]
             else:
-                compressed = True
-                response_body = [self.compressed_challenge]
+                response_body = [self.challenge]
         else:
             try:
                 self.verify_request(environ, cookies[COOKIE_NAME].value)
@@ -211,7 +257,7 @@ class TurnstileMiddleware(WSGIApplication):
             ("Content-Length", str(sum(len(r) for r in response_body))),
         ]
         if compressed:
-            headers.append(("Content-Encoding", "gzip"))
+            headers.append(("Content-Encoding", compressed))
         start_response(status, headers)
         return response_body
 
@@ -262,3 +308,36 @@ class TurnstileMiddleware(WSGIApplication):
             error_codes = ["unknown error"]
         msg = " ".join(e for e in error_codes)
         raise RuntimeError(msg)
+
+    def get_content_encoding(self, environ: WSGIEnvironment) -> str:
+        """Find preferred compression encoding for challenge response.
+
+        Parse Accept-Encoding header with q weights.  Find compression encodings that
+        are supported and return the best one.
+        """
+        accept_encoding = environ.get("HTTP_ACCEPT_ENCODING", "")
+        if not accept_encoding:
+            return ""
+        encodings = [[x.strip() for x in encoding.split(";", 1)] for encoding in accept_encoding.split(",")]
+        ordered = []
+        for e_w in encodings:
+            if len(e_w) == 1 or not e_w[1].startswith("q="):
+                weight = 1.0
+            else:
+                try:
+                    weight = float(e_w[1].split("=", 1)[1])
+                except ValueError:
+                    weight = 1.0
+            if weight <= 0:
+                continue
+            try:
+                c_index = self.compression_order.index(e_w[0])
+            except ValueError:
+                c_index = -1
+            if c_index == -1:
+                continue
+            ordered.append((weight, c_index))
+        if not ordered:
+            return ""
+        ordered.sort()
+        return self.compression_order[ordered[-1][1]]
